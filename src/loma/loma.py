@@ -11,7 +11,7 @@ import tyro
 from torch import nn
 
 from loma.types import Model, Batch
-from loma.device import device, amp_dtype
+from loma.device import default_amp_dtype_for, default_device_and_dtype
 from loma.descriptor.dedode import DeDoDeDescriptor
 from loma.detector.dad import DaD
 
@@ -72,7 +72,7 @@ class FixedPosEnc(nn.Module):
         super().__init__()
         F_dim = F_dim if F_dim is not None else dim
         self.gamma = gamma
-        freqs = torch.randn(F_dim // 2, M).to(device) * self.gamma**-2
+        freqs = torch.randn(F_dim // 2, M) * self.gamma**-2
         self.Wr = nn.Linear(M, F_dim // 2, bias=False)
         with torch.no_grad():
             self.Wr.weight.data = freqs
@@ -238,11 +238,30 @@ class LoMa(Model):
         # Optional pretrained checkpoint URL.
         weights_url: str | None = None
 
-    def __init__(self, cfg: Cfg | None = None) -> None:
+    def __init__(
+        self,
+        cfg: Cfg | None = None,
+        *,
+        device: str | torch.device | None = None,
+        amp_dtype: torch.dtype | None = None,
+    ) -> None:
         super().__init__()
         if cfg is None:
             cfg = LoMa.Cfg()
         self.cfg = cfg
+
+        # Resolve device + dtype once.  self._amp_dtype is the source of
+        # truth for autocast; the actual device is tracked by PyTorch via
+        # self.to(...).  If the caller pins only one of the two, derive
+        # the other from it (so device='cpu' gives bfloat16, etc.).
+        if device is None:
+            device, default_dtype = default_device_and_dtype()
+        else:
+            device = torch.device(device)
+            default_dtype = default_amp_dtype_for(device)
+        if amp_dtype is None:
+            amp_dtype = default_dtype
+        self._amp_dtype = amp_dtype
 
         if cfg.input_dim != cfg.embed_dim:
             self.input_proj = nn.Linear(cfg.input_dim, cfg.embed_dim, bias=True)
@@ -279,7 +298,9 @@ class LoMa(Model):
             [MatchAssignment(cfg.embed_dim) for _ in range(cfg.n_layers)]
         )
 
-        self._detector = DaD(DaD.Cfg(compile=cfg.compile)).eval()
+        self._detector = DaD(
+            DaD.Cfg(compile=cfg.compile), device=device, amp_dtype=amp_dtype,
+        ).eval()
         for p in self._detector.parameters():
             p.requires_grad = False
 
@@ -288,7 +309,9 @@ class LoMa(Model):
                 arch=cfg.descriptor,
                 compile=cfg.compile,
                 descriptor_dim=cfg.input_dim,
-            )
+            ),
+            device=device,
+            amp_dtype=amp_dtype,
         ).eval()
         for p in self._descriptor.parameters():
             p.requires_grad = False
@@ -351,14 +374,14 @@ class LoMa(Model):
         desc0: torch.Tensor,
         desc1: torch.Tensor,
     ) -> dict:
-
+        dev = next(self.parameters()).device
         with torch.autocast(
-            enabled=self.cfg.mp, dtype=amp_dtype, device_type=device.type
+            enabled=self.cfg.mp, dtype=self._amp_dtype, device_type=dev.type
         ):
-            kpts0 = kpts0.to(device)
-            kpts1 = kpts1.to(device)
-            desc0 = desc0.to(device).detach().contiguous()
-            desc1 = desc1.to(device).detach().contiguous()
+            kpts0 = kpts0.to(dev)
+            kpts1 = kpts1.to(dev)
+            desc0 = desc0.to(dev).detach().contiguous()
+            desc1 = desc1.to(dev).detach().contiguous()
             desc0 = self.input_proj(desc0)
             desc1 = self.input_proj(desc1)
             encoding0 = self.posenc(kpts0)
@@ -390,7 +413,7 @@ class LoMa(Model):
             )["descriptions"]
             w, h = Image.open(image).size
         else:
-            image = image.to(device)
+            image = image.to(next(self.parameters()).device)
             batch = {"image": image}
             keypoints = self._detector.detect(batch, num_keypoints=num_keypoints)[
                 "keypoints"

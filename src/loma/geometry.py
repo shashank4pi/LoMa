@@ -6,7 +6,6 @@ import torch.nn.functional as F
 from einops import einsum
 import numpy as np
 
-from loma.device import device
 from loma.types import Warp, GTSource, Batch
 
 
@@ -22,13 +21,13 @@ def get_normalized_grid(
     B: int,
     H: int,
     W: int,
-    overload_device: torch.device | None = None,
+    overload_device: torch.device,
 ) -> torch.Tensor:
     if B == 0:
-        return torch.zeros(0, H, W, 2, device=overload_device or device)
+        return torch.zeros(0, H, W, 2, device=overload_device)
     x1_n = torch.meshgrid(
         *[
-            torch.linspace(-1 + 1 / n, 1 - 1 / n, n, device=overload_device or device)
+            torch.linspace(-1 + 1 / n, 1 - 1 / n, n, device=overload_device)
             for n in (B, H, W)
         ],
         indexing="ij",
@@ -42,10 +41,10 @@ def get_pixel_grid(
     *,
     H: int,
     W: int,
-    overload_device: torch.device | None = None,
+    overload_device: torch.device,
 ) -> torch.Tensor:
     x1_n = torch.meshgrid(
-        *[torch.arange(n, device=overload_device or device) + 0.5 for n in (B, H, W)],
+        *[torch.arange(n, device=overload_device) + 0.5 for n in (B, H, W)],
         indexing="ij",
     )
     x1_n = torch.stack((x1_n[2], x1_n[1]), dim=-1).reshape(B, H, W, 2)
@@ -103,7 +102,7 @@ def warp_and_depth_consistency_from_depths(
     assert one == 1, "depth_A and depth_B must have shape (B, H, W, 1)"
     B, H_A, W_A, one = depth_A.shape
     assert one == 1, "depth_A and depth_B must have shape (B, H, W, 1)"
-    pixel_coords_A = get_pixel_grid(B, H=H_A, W=W_A, overload_device=device)
+    pixel_coords_A = get_pixel_grid(B, H=H_A, W=W_A, overload_device=depth_A.device)
     pixel_coords_AB, z_AB = _pixel_warp_and_depth_from_depth(
         pixel_coords_A=pixel_coords_A,
         depth_A=depth_A,
@@ -205,7 +204,7 @@ def warp_and_cycle_consistency_from_depths(
     B, H_A, W_A, _ = depth_A.shape
     B, H_B, W_B, _ = depth_B.shape
 
-    pixel_coords_A = get_pixel_grid(B, H=H_A, W=W_A, overload_device=device)
+    pixel_coords_A = get_pixel_grid(B, H=H_A, W=W_A, overload_device=depth_A.device)
     pixel_coords_AB, depth_AB = _pixel_warp_and_depth_from_depth(
         pixel_coords_A=pixel_coords_A,
         depth_A=depth_A,
@@ -510,7 +509,7 @@ def compute_gt_warp_from_batch(
     sources: list[GTSource] = batch.source
 
     is_flow_source = torch.tensor(
-        [source == "flow" for source in sources], device=device
+        [source == "flow" for source in sources], device=batch.img_A.device
     )
     B, three, H_A, W_A = batch.img_A.shape
     B, three, H_B, W_B = batch.img_B.shape
@@ -551,20 +550,20 @@ def compute_gt_warp_from_batch(
     assert valid_flow_src is not None and valid_depth_src is not None
     assert error_flow_src is not None and error_depth_src is not None
 
-    covis = torch.zeros((B, H_A, W_A, 1), dtype=torch.float32, device=device)
+    covis = torch.zeros((B, H_A, W_A, 1), dtype=torch.float32, device=batch.img_A.device)
     covis[is_flow_source] = overlap_flow_src.float()
     covis[~is_flow_source] = overlap_depth_src.float()
 
-    warp = torch.zeros((B, H_A, W_A, 2), device=device, dtype=torch.float32)
+    warp = torch.zeros((B, H_A, W_A, 2), device=batch.img_A.device, dtype=torch.float32)
     warp[is_flow_source] = warp_flow_src_AB
     warp[~is_flow_source] = warp_depth_src_AB
     warp[~warp.isfinite()] = 0
 
-    valid = torch.zeros((B, H_A, W_A, 1), device=device, dtype=torch.float32)
+    valid = torch.zeros((B, H_A, W_A, 1), device=batch.img_A.device, dtype=torch.float32)
     valid[is_flow_source] = valid_flow_src
     valid[~is_flow_source] = valid_depth_src
 
-    error = torch.zeros((B, H_A, W_A, 1), device=device, dtype=torch.float32)
+    error = torch.zeros((B, H_A, W_A, 1), device=batch.img_A.device, dtype=torch.float32)
     error[is_flow_source] = error_flow_src
     error[~is_flow_source] = error_depth_src
 

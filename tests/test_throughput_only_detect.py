@@ -2,7 +2,9 @@ from time import perf_counter
 
 from loma import LoMa
 import torch
-from loma.device import device
+from loma.device import default_device_and_dtype
+
+device, _ = default_device_and_dtype()
 
 
 def test_throughput():

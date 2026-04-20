@@ -11,7 +11,7 @@ import torchvision.transforms as transforms
 from PIL import Image
 from loma.io import check_not_i16
 from loma.types import Batch, Model
-from loma.device import device, amp_dtype
+from loma.device import default_amp_dtype_for, default_device_and_dtype
 from loma.detector.utils import sample_keypoints
 import logging
 
@@ -48,16 +48,27 @@ class DaD(Model):
     def __init__(
         self,
         cfg: Cfg | None = None,
+        *,
+        device: str | torch.device | None = None,
+        amp_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         if cfg is None:
             cfg = DaD.Cfg()
+        if device is None:
+            device, default_dtype = default_device_and_dtype()
+        else:
+            device = torch.device(device)
+            default_dtype = default_amp_dtype_for(device)
+        if amp_dtype is None:
+            amp_dtype = default_dtype
+        self._amp_dtype = amp_dtype
         weights = torch.hub.load_state_dict_from_url(
             "https://github.com/Parskatt/dad/releases/download/v0.1.0/dad.pth",
             map_location="cpu",
         )
         if cfg.arch == "dedode_s":
-            encoder, decoder = dedode_detector_S()
+            encoder, decoder = dedode_detector_S(amp_dtype=amp_dtype)
         else:
             raise ValueError(f"Architecture {cfg.arch} not supported")
         self.cfg = cfg
@@ -161,10 +172,12 @@ class DaD(Model):
         return_dense_probs: bool = False,
     ) -> dict[str, torch.Tensor]:
         self.train(False)
-        images = _images_from_detector_input(batch).to(device)
+        images = _images_from_detector_input(batch).to(next(self.parameters()).device)
         return self(images, num_keypoints, return_dense_probs=return_dense_probs)
 
-    def load_image(self, im_path, device=device) -> torch.Tensor:
+    def load_image(self, im_path, device=None) -> torch.Tensor:
+        if device is None:
+            device = next(self.parameters()).device
         pil_im = Image.open(im_path)
         check_not_i16(pil_im)
         pil_im = pil_im.convert("RGB")
@@ -255,7 +268,8 @@ class ConvRefiner(nn.Module):
         hidden_blocks=5,
         amp=True,
         residual=False,
-        amp_dtype=amp_dtype,
+        *,
+        amp_dtype: torch.dtype,
     ):
         super().__init__()
         self.block1 = self.create_block(
@@ -326,7 +340,7 @@ class ConvRefiner(nn.Module):
 
 
 class VGG19(nn.Module):
-    def __init__(self, amp=False) -> None:
+    def __init__(self, amp=False, *, amp_dtype: torch.dtype) -> None:
         super().__init__()
         self.layers = nn.ModuleList(tvm.vgg19_bn().features[:40])
         # Maxpool layers: 6, 13, 26, 39
@@ -348,7 +362,7 @@ class VGG19(nn.Module):
 
 
 class VGG(nn.Module):
-    def __init__(self, size="19", amp=False, amp_dtype=amp_dtype) -> None:
+    def __init__(self, size="19", amp=False, *, amp_dtype: torch.dtype) -> None:
         super().__init__()
         if size == "11":
             self.layers = nn.ModuleList(tvm.vgg11_bn().features[:22])
@@ -375,7 +389,7 @@ class VGG(nn.Module):
             return feats, sizes
 
 
-def dedode_detector_S():
+def dedode_detector_S(*, amp_dtype: torch.dtype):
     residual = True
     hidden_blocks = 3
     amp = True

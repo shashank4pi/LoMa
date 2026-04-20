@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import torchvision.models as tvm
 from PIL import Image
 
-from loma.device import device, amp_dtype
+from loma.device import default_amp_dtype_for, default_device_and_dtype
 from loma.types import Model
 
 logger = logging.getLogger(__name__)
@@ -23,16 +23,34 @@ class DeDoDeDescriptor(Model):
         descriptor_dim: int = 256
         hidden_blocks: int = 5
 
-    def __init__(self, cfg: Cfg) -> None:
+    def __init__(
+        self,
+        cfg: Cfg,
+        *,
+        device: str | torch.device | None = None,
+        amp_dtype: torch.dtype | None = None,
+    ) -> None:
         super().__init__()
+        if device is None:
+            device, default_dtype = default_device_and_dtype()
+        else:
+            device = torch.device(device)
+            default_dtype = default_amp_dtype_for(device)
+        if amp_dtype is None:
+            amp_dtype = default_dtype
+        self._amp_dtype = amp_dtype
 
         if cfg.arch == "dedode_b":
             encoder, decoder = dedode_descriptor_B(
-                descriptor_dim=cfg.descriptor_dim, hidden_blocks=cfg.hidden_blocks
+                descriptor_dim=cfg.descriptor_dim,
+                hidden_blocks=cfg.hidden_blocks,
+                amp_dtype=amp_dtype,
             )
         elif cfg.arch == "dedode_g":
             encoder, decoder = dedode_descriptor_G(
-                descriptor_dim=cfg.descriptor_dim, hidden_blocks=cfg.hidden_blocks
+                descriptor_dim=cfg.descriptor_dim,
+                hidden_blocks=cfg.hidden_blocks,
+                amp_dtype=amp_dtype,
             )
         else:
             raise ValueError(f"Architecture {cfg.arch} not supported")
@@ -96,8 +114,9 @@ class DeDoDeDescriptor(Model):
         keypoints: torch.Tensor,
     ):
         self.train(False)
-        images = images.to(device)
-        keypoints = keypoints.to(device)
+        dev = next(self.parameters()).device
+        images = images.to(dev)
+        keypoints = keypoints.to(dev)
         # TODO is this compile error //je ?
         description_grid = self(images)
         described_keypoints = F.grid_sample(
@@ -115,7 +134,7 @@ class DeDoDeDescriptor(Model):
             )
             .permute(2, 0, 1)
             .float()
-            .to(device)[None]
+            .to(next(self.parameters()).device)[None]
         )
 
     def describe_keypoints_from_path(self, im_path, keypoints, H=784, W=784):
@@ -225,7 +244,7 @@ class ConvRefiner(nn.Module):
 
 
 class VGG(nn.Module):
-    def __init__(self, size="19", amp=False, amp_dtype=amp_dtype) -> None:
+    def __init__(self, size="19", amp=False, *, amp_dtype: torch.dtype) -> None:
         super().__init__()
         if size == "11":
             self.layers = nn.ModuleList(tvm.vgg11_bn().features[:22])
@@ -252,7 +271,7 @@ class VGG(nn.Module):
 
 
 class FrozenDINOv2(nn.Module):
-    def __init__(self, amp=True, amp_dtype=amp_dtype, dinov2_weights=None):
+    def __init__(self, amp=True, *, amp_dtype: torch.dtype, dinov2_weights=None):
         super().__init__()
         if dinov2_weights is None:
             dinov2_weights = torch.hub.load_state_dict_from_url(
@@ -308,7 +327,7 @@ class VGG_DINOv2(nn.Module):
         return feats_vgg + feat_dinov2, sizes_vgg + size_dinov2
 
 
-def dedode_descriptor_B(descriptor_dim: int, hidden_blocks: int = 5):
+def dedode_descriptor_B(descriptor_dim: int, hidden_blocks: int = 5, *, amp_dtype: torch.dtype):
     amp = True
     conv_refiner = nn.ModuleDict(
         {
@@ -352,7 +371,11 @@ def dedode_descriptor_B(descriptor_dim: int, hidden_blocks: int = 5):
 
 
 def dedode_descriptor_G(
-    descriptor_dim: int, dinov2_weights: str | None = None, hidden_blocks: int = 5
+    descriptor_dim: int,
+    dinov2_weights: str | None = None,
+    hidden_blocks: int = 5,
+    *,
+    amp_dtype: torch.dtype,
 ):
     amp = True
 

@@ -4,7 +4,9 @@ from loma import LoMa
 import torch
 from PIL import Image
 import numpy as np
-from loma.device import device
+from loma.device import default_device_and_dtype
+
+device, _ = default_device_and_dtype()
 
 
 def test_throughput():
